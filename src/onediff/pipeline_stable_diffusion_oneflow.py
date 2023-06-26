@@ -749,6 +749,107 @@ class OneFlowStableDiffusionPipeline(DiffusionPipeline, GraphCacheMixin, Textual
             images=image, nsfw_content_detected=has_nsfw_concept
         )
 
+    def load_fast_pipeline(storage_folder):
+        import gc
+        import diffusers
+        import pickle
+        import os
+
+        # disable garbage collector
+        gc.disable()
+
+        def seq_to_func_return(seq, need_unpack=False):
+            if need_unpack:
+                return seq[0]
+            return seq
+
+        def load(filename):
+            filepath = os.path.join(storage_folder, '{}.pkl'.format(filename))
+            # Open a file in binary mode
+            with open(filepath, 'rb') as file:
+                # disable garbage collector
+                gc.disable()
+
+                # Pickle dump the object to the file
+                dump = pickle.load(file)
+
+                # enable garbage collector again
+                gc.enable()
+
+                return dump
+
+        flow.mock_torch.enable()
+        previous_init = OneFlowStableDiffusionPipeline.__init__
+
+        def hijacked_init(self,
+            vae,
+            text_encoder,
+            tokenizer,
+            unet,
+            scheduler,
+            safety_checker,
+            feature_extractor,
+            requires_safety_checker=False):
+                unet = load('unet')
+                vae = load('vae')
+                text_encoder = load('text_encoder')
+                safety_checker = None
+
+                return previous_init(self,
+                    vae,
+                    text_encoder,
+                    tokenizer,
+                    unet,
+                    scheduler,
+                    safety_checker,
+                    feature_extractor,
+                    requires_safety_checker=False
+                )
+
+        OneFlowStableDiffusionPipeline.__init__ = hijacked_init
+
+        previous_load_sub_model = diffusers.pipelines.pipeline_utils.load_sub_model
+        def hijacked_load_sub_model(*args, **kwargs):
+            if kwargs['name'] == 'unet' or kwargs['name'] == 'vae' or kwargs['name'] == 'text_encoder' or kwargs['name'] == 'safety_checker':
+                return None
+            return previous_load_sub_model(*args, **kwargs)
+
+        diffusers.pipelines.pipeline_utils.load_sub_model = hijacked_load_sub_model
+
+        pipe = OneFlowStableDiffusionPipeline.from_pretrained(
+            "CompVis/stable-diffusion-v1-4",
+            use_auth_token=True,
+            revision="fp16",
+            torch_dtype=flow.float16,
+        )
+
+        pipe = pipe.to("cuda")
+
+        unet_graph = pipe.get_graph("unet", pipe.unet)
+        vae_graph = pipe.get_graph("vae", pipe.vae)
+
+        def create_hijack_compile(self, model):
+            def hijack_compile(*args, **kwargs):
+                # disable garbage collector
+                gc.disable()
+
+                state_dict = load('{}_compiled'.format(model))
+
+                # enable garbage collector again
+                gc.enable()
+            
+                self.load_runtime_state_dict(state_dict)
+                return (self._full_job_proto, seq_to_func_return(self._eager_outputs_buffer[0], True),)
+            return hijack_compile
+
+        unet_graph._compile_new = create_hijack_compile(unet_graph, 'unet')
+        vae_graph._compile_new = create_hijack_compile(vae_graph, 'vae')
+
+        # enable garbage collector again
+        gc.enable()
+
+        return pipe
+
     def precompile_and_save_static_graph(storage_folder):
         import gc
         import pickle
