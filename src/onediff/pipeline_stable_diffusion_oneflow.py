@@ -748,3 +748,58 @@ class OneFlowStableDiffusionPipeline(DiffusionPipeline, GraphCacheMixin, Textual
         return StableDiffusionPipelineOutput(
             images=image, nsfw_content_detected=has_nsfw_concept
         )
+
+    def precompile_and_save_static_graph(storage_folder):
+        import gc
+        import pickle
+        import os
+
+        gc.disable()
+        flow.mock_torch.enable()
+
+        def save(filename, data):
+            # Create the directory and its parents if they don't exist
+            filepath = os.path.join(storage_folder, '{}.pkl'.format(filename))
+            # Extract the directory path
+            directory_path = os.path.dirname(filepath)
+            # Create the directories for the folder of the file path
+            os.makedirs(directory_path, exist_ok=True)
+            # Open a file in binary mode
+            with open(filepath, 'wb') as file:
+                # Pickle dump the object to the file
+                pickle.dump(data, file)
+
+        pipe = OneFlowStableDiffusionPipeline.from_pretrained(
+            "CompVis/stable-diffusion-v1-4",
+            use_auth_token=True,
+            revision="fp16",
+            torch_dtype=flow.float16,
+        )
+
+        # Save static graphs
+        save('unet', pipe.unet)
+        save('vae', pipe.vae)
+        save('text_encoder', pipe.text_encoder)
+        save('safety_checker', pipe.safety_checker)
+
+        # Override the ._compile of each below before doing the __call__ on pipe
+        unet_graph = pipe.get_graph("unet", pipe.unet)
+        vae_graph = pipe.get_graph("vae", pipe.vae)
+
+        def create_hijack_compile(self, model):
+            graph_compilation_func = self._compile_new
+            def hijack_compile(*args, **kwargs):
+                # Call the graph compilation
+                print("Hijacking the compile for model {}".format(model))
+                eager_output = graph_compilation_func(*args, **kwargs)
+                state_dict = self.runtime_state_dict()
+                save('{}_compiled'.format(model), state_dict)
+                return eager_output
+            return hijack_compile
+
+        unet_graph._compile_new = create_hijack_compile(unet_graph, 'unet')
+        vae_graph._compile_new = create_hijack_compile(vae_graph, 'vae')
+
+        # Perform forward pass
+        pipe = pipe.to("cuda")
+        pipe("Unraveling Time: Depict a scene where time appears to be flowing in reverse, unraveling the fabric of reality.")
