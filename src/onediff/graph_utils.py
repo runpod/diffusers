@@ -1,41 +1,47 @@
 import os
 import oneflow as flow
+enable_shared=True
+cache_size=10
+enable_save=True
 
+# We unpack UNetGraph and VaeGraph out of the original methods to enable python's pickling procedure to work correctly.
+class UNetGraph(flow.nn.Graph):
+    @flow.nn.Graph.with_dynamic_input_shape(
+        enable_shared=enable_shared, size=cache_size
+    )
+    def __init__(self, unet):
+        super().__init__(enable_get_runtime_state_dict=enable_save)
+        self.unet = unet
+        self.config.enable_cudnn_conv_heuristic_search_algo(False)
+        self.config.allow_fuse_add_to_output(True)
+
+    def build(self, latent_model_input, t, text_embeddings):
+        text_embeddings = flow._C.amp_white_identity(text_embeddings)
+        return self.unet(
+            latent_model_input, t, encoder_hidden_states=text_embeddings
+        ).sample
 
 def get_unet_graph(cache_size, enable_shared, enable_save, *args, **kwargs):
-    class UNetGraph(flow.nn.Graph):
-        @flow.nn.Graph.with_dynamic_input_shape(
-            enable_shared=enable_shared, size=cache_size
-        )
-        def __init__(self, unet):
-            super().__init__(enable_get_runtime_state_dict=enable_save)
-            self.unet = unet
-            self.config.enable_cudnn_conv_heuristic_search_algo(False)
-            self.config.allow_fuse_add_to_output(True)
-
-        def build(self, latent_model_input, t, text_embeddings):
-            text_embeddings = flow._C.amp_white_identity(text_embeddings)
-            return self.unet(
-                latent_model_input, t, encoder_hidden_states=text_embeddings
-            ).sample
-
+    # https://github.com/Oneflow-Inc/oneflow/blob/f72ebf682530933e323d45d77ae1a836d8af753d/python/oneflow/nn/graph/graph.py#L834
+    print(cache_size, enable_shared, enable_save)
     return UNetGraph(*args, **kwargs)
 
+class VaeGraph(flow.nn.Graph):
+    @flow.nn.Graph.with_dynamic_input_shape(
+        enable_shared=enable_shared, size=cache_size
+    )
+    def __init__(self, vae_post_process) -> None:
+        super().__init__(enable_get_runtime_state_dict=enable_save)
+        self.vae_post_process = vae_post_process
+        self.config.enable_cudnn_conv_heuristic_search_algo(False)
+        self.config.allow_fuse_add_to_output(True)
+
+    def build(self, latents):
+        return self.vae_post_process(latents)
 
 def get_vae_graph(cache_size, enable_shared, enable_save, *args, **kwargs):
-    class VaeGraph(flow.nn.Graph):
-        @flow.nn.Graph.with_dynamic_input_shape(
-            enable_shared=enable_shared, size=cache_size
-        )
-        def __init__(self, vae_post_process) -> None:
-            super().__init__(enable_get_runtime_state_dict=enable_save)
-            self.vae_post_process = vae_post_process
-            self.config.enable_cudnn_conv_heuristic_search_algo(False)
-            self.config.allow_fuse_add_to_output(True)
-
-        def build(self, latents):
-            return self.vae_post_process(latents)
-
+    # https://github.com/Oneflow-Inc/oneflow/blob/f72ebf682530933e323d45d77ae1a836d8af753d/python/oneflow/nn/graph/graph.py#L834
+    print(cache_size, enable_shared, enable_save)
     return VaeGraph(*args, **kwargs)
 
 
